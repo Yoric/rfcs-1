@@ -37,8 +37,8 @@ operations.
 
 This proposal is very strongly inspired from F#'s unit of measure system
 [*Types for units-of-measure: Theory and practice*, by Andrew Kennedy](https://scholar.google.fr/citations?hl=en&user=n48ZVvQAAAAJ&view_op=list_works&sortby=pubdate#d=gs_md_cita-d&p=&u=%2Fcitations%3Fview_op%3Dview_citation%26hl%3Den%26user%3Dn48ZVvQAAAAJ%26cstart%3D20%26pagesize%3D80%26sortby%3Dpubdate%26citation_for_view%3Dn48ZVvQAAAAJ%3A3fE2CSJIrl8C%26tzom%3D-120).
-
-**CITATION NEEDED**.
+By opposition to that work, though, we do not assume that `0` is polymorphic
+in unit of measure.
 
 
 # Detailed design
@@ -78,54 +78,59 @@ rationals, big integers, big rationals, etc. Similarly, there is no reason to pr
 vectors from having units as a whole. For this reason, in the current proposal, units
 can be attached to any value.
 
-## Standard library
+## Standard library (user-facing)
 
 We extend the standard library with a new module `units`.
 
-This module defines the following traits and structs:
+This module defines the following user-level traits and structs:
 
 ```rust
 /// A unit of measure.
 ///
-/// This trait is special, insofar as the type-checker ensures
-/// that it is only applied to either void types or the type
-/// combinators defined below.
-///
-/// Examples:
-/// ```
-/// pub struct Meter;
-/// impl Unit for Meter {};
-/// ```
+/// This trait is meant to be used mainly with void structs, but can
+/// be implemented by any type.
 pub trait Unit {}
 
 /// A value with a unit.
 pub struct Measure<T, U: Unit> {
     value: T,
-    unit: PhantomData<U>
-};
+    unit: PhantomData<U>,
+}
 
 /// A dimensionless value.
-pub struct Dimensionless;
-impl Unit for Dimensionless {}
+///
+/// This trait constitutes a proof obligation for the type-checker.
+///
+/// This trait is special, insofar as the type-checker ensures
+/// that it can only be implemented by the type combinators
+/// defined below.
+trait ODimensionless: Unit {}
 
 /// The type-level product of two units of measure.
-pub trait TMul<A, B> where A: Unit, B: Unit {
-    type Type;
+///
+/// This trait constitutes a proof obligation for the type-checker.
+///
+/// This trait is special, insofar as the type-checker ensures
+/// that it can only be implemented by the type combinators
+/// defined below.
+pub trait OMul: Unit where Self::Left: Unit, Self::Right: Unit {
+    type Left;
+    type Right;
 }
-impl<A: Unit, B: Unit> Unit for TMul<A, B> {}
 
-/// The type-level inverse of a unit of measure.
-pub trait TInv<A> where A: Unit {}
-impl<A: Unit, B: Unit> Unit for TInv<A, B> {
-    type Type;
+/// The type-level product of two units of measure.
+///
+/// This trait constitutes a proof obligation for the type-checker.
+///
+/// This trait is special, insofar as the type-checker ensures
+/// that it can only be implemented by the type combinators
+/// defined below.
+pub trait OInv: Unit where Self::Inner: Unit {
+    type Inner;
 }
 ```
 
-Note that `Unit`, `TMul` and `TInv` are special traits, used internally by the compiler. More on this
-in the next section.
-
-
-Furthermore, common operations are defined for `Measure`, as follows:
+We also define the common operations on `Measure`, as follows:
 
 ```rust
 /// Build a Measure<T, U> from a T.
@@ -181,37 +186,142 @@ impl<T, U: Unit> Add<Self> for Measure<T, U> where T: Add<Output = T> {
     }
 }
 
-/// During multiplication,
-impl<T, U: Unit, V: Unit, W: Unit> Mul<Measure<T, V>> for Measure<T, U> where T: Mul<T>, W: TMul<U, V> {
+/// Multiply a dimensionless value with a measure.
+///
+/// ```rust
+/// let one_meter : Measure<isize, Meter> = Measure::from(1);
+/// let ten_meters : Measure<isize, Meter> = 10 * one_meter;
+/// ```
+impl<T, U: Unit> std::ops::Mul<Measure<T, U>> for T where T: std::ops::Mul<T> {
+    type Output = std::ops::Mul<Measure<T, U>>;
+    fn add(self, rhs: Measure<T, U>) -> Self::Output {
+        Measure(self * rhs.0)
+    }
+}
+
+impl<T, U: Unit> std::ops::Mul<Self> for Measure<T, U> where T: std::ops::Mul<T> {
+    type Output = Self;
+    fn add(self, rhs: Measure<T, U>) -> Self::Output {
+        Measure(self.0 * rhs.0)
+    }
+}
+
+/// Multiply by a dimensioned value.
+impl<T, U: Unit, V: Unit, W: Unit> Mul<Measure<T, V>> for Measure<T, U> where T: std::ops::Mul<T>,
+    W: OMul<Left = U, Right = V>
+{
     type Output = Measure<T, W>;
     fn add(self, rhs: Measure<T, V>) -> Self::Output {
-        Measure(self.0 + rhs.0)
+        Measure(self.0 * rhs.0)
     }
 }
 
 // ... other arithmetic operations.
 ```
 
+## Standard library (embedded logics)
+
+We further extend the standard library with the following
+types. These types are primarily meant to be injected by
+the compiler after type inference, to represent the
+canonical implementation of a type implementing a given
+unit signature.
+
+```rust
+pub struct PDimensionless;
+impl Unit for PDimensionless {}
+impl ODimensionless for PDimensionless {}
+
+/// Exposing type-level product.
+pub struct PMul<A, B> where A: Unit, B: Unit {
+    left: PhantomData<A>,
+    right: PhantomData<B>,
+}
+impl<A: Unit, B: Unit> Unit for PMul<A, B> {}
+impl<A: Unit, B: Unit> OMul for PMul<A, B> {
+    type Left = A;
+    type Right = B;
+}
+
+/// Exposing type-level inversion.
+pub struct PInv<A> where A: Unit {
+    inner: PhantomData<A>
+}
+impl<A: Unit> Unit for PInv<A> {}
+impl<A: Unit> OInv for PInv<A> {
+    type Inner = A;
+}
+
+/// Exposing type-level commutativity
+pub struct PComm<A> where A: OMul {
+    inner: PhantomData<A>
+}
+impl<A: OMul> Unit for PComm<A> {}
+impl<A: OMul> OMul for PComm<A> {
+    type Left  = A::Right;
+    type Right = A::Left;
+}
+
+/// Exposing type-level associativity
+pub struct PAssoc<A: Unit, B: OMul> {
+    left: PhantomData<A>,
+    right: PhantomData<B>,
+}
+impl<A: Unit, B: OMul> Unit for PAssoc<A, B> {}
+impl<A: Unit, B: OMul> OMul for PAssoc<A, B> {
+    type Left = PMul<A, B::Left>;
+    type Right = B::Right;
+}
+
+/// Inverse
+impl<A: Unit, B: OInv<Inner = A>> ODimensionless for PMul<A, B> {
+
+}
+
+/// Neutral element is its own inverse
+impl<A: ODimensionless> ODimensionless for PInv<A> {
+
+}
+
+
+/// Exposing neutrality of Id
+struct PId<A: OMul> where A::Left : ODimensionless {
+    inner: PhantomData<A>,
+}
+impl<A: OMul> Unit for PId<A> where A::Left : ODimensionless  { }
+impl<A: OMul> OMul for PId<A> where A::Left : ODimensionless, A::Right: OMul  {
+    type Left = <<A as OMul>::Right as OMul>::Left;
+    type Right = <<A as OMul>::Right as OMul>::Right;
+}
+impl<A: OMul> OInv for PId<A> where A::Left : ODimensionless, A::Right: OInv  {
+    type Inner = <<A as OMul>::Right as OInv>::Inner;
+}
+```
+
+Our objective, at this stage, is to find the smallest
+chain of `PId`, `PMul`, ... nodes needed to produce an
+element of type `ODimensionless`, `OMul<A, B>`, ...
+
+The main complication being type variables.
+
+**FIXME** What kind of power do we lose if we don't care about type
+variables in this RFC?
+
 ## Type system
 
 ### Traits
-We first introduce the following constraints on trait `Unit`:
 
-- any void struct may implement `Unit`;
-- all implementations of `TMul`implement `Unit`;
-- all implementations of `TInv`implement `Unit`.
+The traits `OMul`, `OInv`, `ODimensionless` may only be implemented
+by the structs above.
 
-These are the only ways of implementing `Unit`.
-
-Only the compiler may produce structures that implement `TMul` or `TInv`.
-
+**FIXME** What's the worst that can happen if someone implements them?
 
 ### Unit expressions
 
 (pretty much everything from this point is ported from Andrew Kennedy's work)
 
-We gather all the `where U: TMul<V, W>` and `where U: TInv<V>` constraints
-as a set of unification obligations expressed as *Unify(u, v)*, where *u* and *v*
+We gather all the `where U: PMul<V, W>`, `where U: PInv<V>` and `where U: ODimensionless`
+constraints as a set of unification obligations expressed as *Unify(u, v)*, where *u* and *v*
 are defined using the following grammar for unit expressions:
 
 ```
@@ -235,7 +345,7 @@ The type system implements the following equational theory (ported from **CITATI
 
 ```
 ------ (REFL)
-u == v
+u == u
 ```
 
 
@@ -379,7 +489,8 @@ that this is the most general unifier.
 ### Canonical types
 
 This unification gives us the ability to introduce a canonical implementation
-of `TInv<U>` and `TMul<U, V>` constraints.
+of `PInv<U>` and `PMul<U, V>` constraints by converting each substitution
+to a chain of `PMul`, `PInv`, `PComm`, ...
 
 **FIXME** At least, I think so. Detail how.
 
@@ -388,15 +499,14 @@ of `TInv<U>` and `TMul<U, V>` constraints.
 
 When parsing a type expression:
 
-- `U * V` is the name of the canonical implementation of `TMul<U, V>`;
-- `U / V` is the name of the canonical implementation `TMul<U, TInv<V>>`;
-- `U^-1` is the name of the canonical implementation `TInv<U>`.
+- `U * V` is the name of the canonical implementation of `PMul<U, V>`;
+- `U^-1` is the name of the canonical implementation `PInv<U>`.
+- `U / V` is the same thing as `U * V^-1`;
 
 When printing an error message:
 
-- `U * V` is used to represent the constraint `TMul<U, V>`;
-- `U / V` is used to represent the constraint `TMul<U, TInv<V>>`;
-- `U^-1` is used to represent the constraint `TInv<U>`.
+- `U * V` is used to represent the constraint `PMul<U, V>`;
+- `U^-1` is used to represent the constraint `PInv<U>`.
 
 
 
@@ -430,5 +540,9 @@ it suffers from the usual Boost problem of very complex error messages.
 
 # Unresolved questions
 [unresolved]: #unresolved-questions
+
+We have not attempted to provide the most generic definition possible of
+`Add`, `Mul`, etc. We are content with simpler definitions, until a possible
+followup RFC.
 
 What parts of the design are still TBD?
