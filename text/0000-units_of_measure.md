@@ -97,14 +97,14 @@ pub struct Measure<T, U: Unit> {
     unit: PhantomData<U>,
 }
 
+/// Private trait, kept private to ensure that nobody can implement
+/// `ODimensionless`, etc. from outside this module.
+trait Private {}
+
 /// A dimensionless value.
 ///
 /// This trait constitutes a proof obligation for the type-checker.
-///
-/// This trait is special, insofar as the type-checker ensures
-/// that it can only be implemented by the type combinators
-/// defined below.
-trait ODimensionless: Unit {}
+pub trait ODimensionless: Unit + Private {}
 
 /// The type-level product of two units of measure.
 ///
@@ -113,7 +113,7 @@ trait ODimensionless: Unit {}
 /// This trait is special, insofar as the type-checker ensures
 /// that it can only be implemented by the type combinators
 /// defined below.
-pub trait OMul: Unit where Self::Left: Unit, Self::Right: Unit {
+pub trait OMul: Unit + Private where Self::Left: Unit, Self::Right: Unit {
     type Left;
     type Right;
 }
@@ -125,7 +125,7 @@ pub trait OMul: Unit where Self::Left: Unit, Self::Right: Unit {
 /// This trait is special, insofar as the type-checker ensures
 /// that it can only be implemented by the type combinators
 /// defined below.
-pub trait OInv: Unit where Self::Inner: Unit {
+pub trait OInv: Unit + Private where Self::Inner: Unit {
     type Inner;
 }
 ```
@@ -230,6 +230,7 @@ unit signature.
 ```rust
 pub struct PDimensionless;
 impl Unit for PDimensionless {}
+impl Private for PDimensionless {}
 impl ODimensionless for PDimensionless {}
 
 /// Exposing type-level product.
@@ -238,6 +239,7 @@ pub struct PMul<A, B> where A: Unit, B: Unit {
     right: PhantomData<B>,
 }
 impl<A: Unit, B: Unit> Unit for PMul<A, B> {}
+impl<A: Unit, B: Unit> Private for PMul<A, B> {}
 impl<A: Unit, B: Unit> OMul for PMul<A, B> {
     type Left = A;
     type Right = B;
@@ -248,6 +250,7 @@ pub struct PInv<A> where A: Unit {
     inner: PhantomData<A>
 }
 impl<A: Unit> Unit for PInv<A> {}
+impl<A: Unit> Private for PInv<A> {}
 impl<A: Unit> OInv for PInv<A> {
     type Inner = A;
 }
@@ -257,6 +260,7 @@ pub struct PComm<A> where A: OMul {
     inner: PhantomData<A>
 }
 impl<A: OMul> Unit for PComm<A> {}
+impl<A: OMul> Private for PComm<A> {}
 impl<A: OMul> OMul for PComm<A> {
     type Left  = A::Right;
     type Right = A::Left;
@@ -268,6 +272,7 @@ pub struct PAssoc<A: Unit, B: OMul> {
     right: PhantomData<B>,
 }
 impl<A: Unit, B: OMul> Unit for PAssoc<A, B> {}
+impl<A: Unit, B: OMul> Private for PAssoc<A, B> {}
 impl<A: Unit, B: OMul> OMul for PAssoc<A, B> {
     type Left = PMul<A, B::Left>;
     type Right = B::Right;
@@ -289,6 +294,7 @@ struct PId<A: OMul> where A::Left : ODimensionless {
     inner: PhantomData<A>,
 }
 impl<A: OMul> Unit for PId<A> where A::Left : ODimensionless  { }
+impl<A: OMul> Private for PId<A> where A::Left : ODimensionless  { }
 impl<A: OMul> OMul for PId<A> where A::Left : ODimensionless, A::Right: OMul  {
     type Left = <<A as OMul>::Right as OMul>::Left;
     type Right = <<A as OMul>::Right as OMul>::Right;
@@ -298,29 +304,40 @@ impl<A: OMul> OInv for PId<A> where A::Left : ODimensionless, A::Right: OInv  {
 }
 ```
 
-Our objective, at this stage, is to find the smallest
-chain of `PId`, `PMul`, ... nodes needed to produce an
-element of type `ODimensionless`, `OMul<A, B>`, ...
+## Type checking
 
-The main complication being type variables.
+This embedded logics gives users a (admittedly awkward)
+tool to prove unification between two units of measure.
+
+**FIXME** Examples needed.
+
+
+## Type inference
+
+(pretty much everything in this section is ported from Andrew Kennedy's work)
+
+While users can chain `PId`, `PMul`, etc. to produce an element of type
+`ODimensionless`, `OMul<A, B>`, etc. ideally, this should be the job of
+the compiler – more precisely, proving unification is the job of type
+inference.
+
+Rust's current type system cannot do it, largely because of the following
+problems:
+- we would need a way to specify *equivalence* between two dimension types;
+- we would need a way to specify *simplification* of a dimension type.
+
+Also, to make things more complicated:
+- simplification of type variables;
+- error messages are a problem.
+
 
 **FIXME** What kind of power do we lose if we don't care about type
 variables in this RFC?
 
-## Type system
-
-### Traits
-
-The traits `OMul`, `OInv`, `ODimensionless` may only be implemented
-by the structs above.
-
-**FIXME** What's the worst that can happen if someone implements them?
 
 ### Unit expressions
 
-(pretty much everything from this point is ported from Andrew Kennedy's work)
-
-We gather all the `where U: PMul<V, W>`, `where U: PInv<V>` and `where U: ODimensionless`
+We gather all the `where U: OMul<V, W>`, `where U: OInv<V>` and `where U: ODimensionless`
 constraints as a set of unification obligations expressed as *Unify(u, v)*, where *u* and *v*
 are defined using the following grammar for unit expressions:
 
@@ -505,10 +522,10 @@ When parsing a type expression:
 
 When printing an error message:
 
-- `U * V` is used to represent the constraint `PMul<U, V>`;
-- `U^-1` is used to represent the constraint `PInv<U>`.
+- `U * V` is used to represent the constraint `OMul<U, V>`;
+- `U^-1` is used to represent the constraint `OInv<U>`.
 
-
+**FIXME** Examples.
 
 # Drawbacks
 [drawbacks]: #drawbacks
@@ -545,4 +562,4 @@ We have not attempted to provide the most generic definition possible of
 `Add`, `Mul`, etc. We are content with simpler definitions, until a possible
 followup RFC.
 
-What parts of the design are still TBD?
+**FIXME** More?
